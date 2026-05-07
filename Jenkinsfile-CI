@@ -1,0 +1,153 @@
+pipeline {
+    agent any
+    
+    tools {
+        maven 'Maven-3.9'
+        jdk 'JDK-21'
+    }
+    
+    environment {
+        DOCKER_CREDS = credentials('docker-credentials')
+        DOCKER_USERNAME = "${DOCKER_CREDS_USR}"
+        DOCKER_PASSWORD = "${DOCKER_CREDS_PSW}"
+        DOCKER_IMAGE = "rayenmekni123/evaluation-service"
+        SONAR_HOST_URL = 'http://localhost:9000'
+        SONAR_TOKEN = credentials('sonar-token')
+        MYSQL_CONTAINER = "mysql-test-eval-${BUILD_ID}"
+        SPRING_DATASOURCE_URL = 'jdbc:mysql://localhost:3307/evaluation'
+        SPRING_DATASOURCE_USERNAME = 'root'
+        SPRING_DATASOURCE_PASSWORD = 'root'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/rayenmekni/evaluation-service',
+                    credentialsId: 'github-credentials'
+                echo "Commit SHA: ${env.GIT_COMMIT}"
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                echo "Compiling Java source code..."
+                bat 'mvn clean compile -q'
+            }
+        }
+        
+        stage('Start MySQL') {
+            steps {
+                script {
+                    echo "Starting MySQL 8.0 container..."
+                    bat """
+                        docker run -d ^
+                            --name ${MYSQL_CONTAINER} ^
+                            -e MYSQL_ROOT_PASSWORD=root ^
+                            -e MYSQL_DATABASE=evaluation ^
+                            -p 3307:3306 ^
+                            mysql:8.0
+                    """
+                    echo "Waiting for MySQL to be ready..."
+                    sleep(time: 30, unit: 'SECONDS')
+                    bat "docker exec ${MYSQL_CONTAINER} mysqladmin ping -h localhost --silent"
+                    echo "MySQL is ready"
+                }
+            }
+        }
+        
+        stage('Tests Unitaires') {
+            steps {
+                bat 'mvn test'
+            }
+            post {
+                always {
+                    junit 'target/surefire-reports/*.xml'
+                }
+            }
+        }
+        
+        stage('JaCoCo Coverage') {
+            steps {
+                bat 'mvn jacoco:report'
+                echo "Coverage reports generated"
+            }
+        }
+        
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    withSonarQubeEnv('SonarQube') {
+                        bat """
+                            mvn sonar:sonar ^
+                                -Dsonar.projectKey=evaluation-service ^
+                                -Dsonar.host.url=%SONAR_HOST_URL% ^
+                                -Dsonar.login=%SONAR_TOKEN% ^
+                                -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Package JAR') {
+            steps {
+                bat 'mvn package -DskipTests'
+                stash includes: 'target/*.jar', name: 'jar-artifact'
+            }
+        }
+        
+        stage('Docker Build') {
+            steps {
+                script {
+                    unstash 'jar-artifact'
+                    bat """
+                        docker build -t ${DOCKER_IMAGE}:latest ^
+                                     -t ${DOCKER_IMAGE}:${env.GIT_COMMIT} ^
+                                     .
+                    """
+                }
+            }
+        }
+        
+        stage('Docker Push') {
+            steps {
+                script {
+                    bat "echo ${DOCKER_PASSWORD} | docker login -u ${DOCKER_USERNAME} --password-stdin"
+                    bat """
+                        docker push ${DOCKER_IMAGE}:latest
+                        docker push ${DOCKER_IMAGE}:${env.GIT_COMMIT}
+                    """
+                }
+            }
+        }
+        
+        stage('Trigger CD Pipeline') {
+            steps {
+                script {
+                    build job: 'evaluation-service-CD',
+                          parameters: [
+                              string(name: 'IMAGE_TAG', value: "${env.GIT_COMMIT}"),
+                              string(name: 'DOCKER_IMAGE', value: "${DOCKER_IMAGE}")
+                          ],
+                          wait: false
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                bat "docker stop ${MYSQL_CONTAINER} || exit 0"
+                bat "docker rm ${MYSQL_CONTAINER} || exit 0"
+            }
+        }
+        success {
+            echo "CI Pipeline completed successfully!"
+        }
+        failure {
+            echo "CI Pipeline failed."
+        }
+    }
+}

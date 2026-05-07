@@ -1,0 +1,53 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Docker image tag')
+        string(name: 'DOCKER_IMAGE', defaultValue: 'rayenmekni123/evaluation-service', description: 'Docker image name')
+    }
+
+    environment {
+        NAMESPACE = 'competence'
+    }
+
+    stages {
+        stage('Check Kubernetes') {
+            steps {
+                script {
+                    bat(script: 'kubectl cluster-info', returnStatus: true)
+                }
+            }
+        }
+
+        stage('Deploy MySQL Evaluation') {
+            steps {
+                script {
+                    bat "kubectl apply -f k8s/mysql-evaluation-deployment.yaml -n ${NAMESPACE}"
+                }
+            }
+        }
+
+        stage('Deploy Evaluation Service') {
+            steps {
+                script {
+                    bat "kubectl set image deployment/evaluation-service evaluation-service=${params.DOCKER_IMAGE}:${params.IMAGE_TAG} -n ${NAMESPACE} || kubectl apply -f k8s/evaluation-deployment.yaml -n ${NAMESPACE}"
+                }
+            }
+        }
+
+        stage('Verify') {
+            steps {
+                bat "kubectl get pods -n ${NAMESPACE}"
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Evaluation service deployed! Access at http://localhost:30090"
+        }
+        failure {
+            echo "CD Pipeline failed."
+        }
+    }
+}
