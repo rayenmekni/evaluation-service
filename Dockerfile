@@ -36,7 +36,7 @@ RUN chown spring:spring app.jar
 USER spring:spring
 
 # Expose application port
-EXPOSE 8089
+EXPOSE 8090
 
 # Health check configuration
 HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
